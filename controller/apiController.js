@@ -12,7 +12,6 @@ const {
   GetDocumentAnalysisCommand,
 } = require("@aws-sdk/client-textract");
 const fs = require('fs').promises;
-
 // Initialize the Textract client
 const textractClient = new TextractClient({
   region: "eu-west-2", // Specify your AWS region
@@ -30,32 +29,9 @@ const storage = multer.diskStorage({
     cb(null, file.originalname);
   },
 });
-const upload = multer({ storage: storage });
-
-function checkFileType(file, cb) {
-  // Allowed ext
-  const filetypes = /pdf/;
-  // Check ext
-  const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-  // Check mime
-  const mimetype = filetypes.test(file.mimetype);
-
-  if (mimetype && extname) {
-    return cb(null, true);
-  } else {
-    cb('Error: PDFs Only!');
-  }
-}
-
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-const chunkArray = (array, chunkSize) => {
-  const chunks = [];
-  for (let i = 0; i < array.length; i += chunkSize) {
-    chunks.push(array.slice(i, i + chunkSize));
-  }
-  return chunks;
-};
+const upload = multer({ storage: storage });
 
 const startDocumentAnalysis = async (s3Key, queries, adapterId, adapterVersion) => {
   const params = {
@@ -84,6 +60,7 @@ const startDocumentAnalysis = async (s3Key, queries, adapterId, adapterVersion) 
   const response = await textractClient.send(command);
   return response.JobId;
 };
+
 
 const retryWithBackoff = async (fn, retries = 5, delay = 1000) => {
   for (let i = 0; i < retries; i++) {
@@ -286,8 +263,6 @@ const uploadFiles = async (req, res) => {
             fileName: file.originalname,
             s3Keys: s3Keys,
           });
-
-          // Note: Removed the file deletion logic
         } else if (file.mimetype.startsWith('image/')) {
           // Handle image file
           const imageFileContent = await fs.readFile(inputFilePath);
@@ -309,7 +284,7 @@ const uploadFiles = async (req, res) => {
             fileName: file.originalname,
             s3Keys: [s3Key],
           });
-
+          // await unlinkAsync(file.path)
           // Note: Removed the file deletion logic
         } else {
           console.error('Unsupported file type:', file.mimetype);
@@ -352,8 +327,7 @@ const deleteAllUploads = async (req, res) => {
 
   try {
     await deleteDirectoryContents(directory);
-    await deleteDirectoryContents(rootUploadsDir);
-
+    await fs.rmdir(rootUploadsDir, { recursive: true, force: true});
     res.send({ message: 'All files and directories in the uploads folder have been deleted successfully.' });
   } catch (err) {
     console.error('Error deleting uploads folder contents:', err);
