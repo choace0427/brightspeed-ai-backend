@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const paystubRouter = require("./api/paystubRouter");
+const apiRouter = require("./api/apiRouter");
 
 
 router.use(function (req, res, next) {
@@ -11,6 +11,6 @@ router.use(function (req, res, next) {
   next();
 });
 
-router.use("/paystub", paystubRouter);
+router.use("/api", apiRouter);
 
 module.exports = router;
