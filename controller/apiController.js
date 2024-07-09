@@ -210,7 +210,11 @@ const analyzePDF = async (req, res) => {
   }
 };
 
-const uploadFiles = (req, res) => {
+const uploadFiles = async (req, res) => {
+  const rootUploadsDir = path.join(__dirname, '..', 'uploads'); // Path to the root uploads directory
+  // Ensure the root uploads directory exists
+  await fs.mkdir(rootUploadsDir, { recursive: true });
+
   upload.array('files')(req, res, async (error) => {
     if (error instanceof multer.MulterError) {
       console.error('Multer Error:', error);
@@ -226,6 +230,9 @@ const uploadFiles = (req, res) => {
     }
 
     try {
+
+
+
       const allS3Keys = [];
 
       for (const file of req.files) {
