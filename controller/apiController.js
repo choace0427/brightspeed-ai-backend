@@ -328,7 +328,7 @@ const uploadFiles = (req, res) => {
 // Function to recursively delete all files and directories within a given directory
 const deleteAllUploads = async (req, res) => {
   const directory = path.join(__dirname, 'uploads');
-
+  const rootUploadsDir = path.join(__dirname, '..', 'uploads');
   const deleteDirectoryContents = async (dir) => {
     const files = await fs.readdir(dir);
     await Promise.all(files.map(async (file) => {
@@ -345,6 +345,8 @@ const deleteAllUploads = async (req, res) => {
 
   try {
     await deleteDirectoryContents(directory);
+    await deleteDirectoryContents(rootUploadsDir);
+
     res.send({ message: 'All files and directories in the uploads folder have been deleted successfully.' });
   } catch (err) {
     console.error('Error deleting uploads folder contents:', err);
