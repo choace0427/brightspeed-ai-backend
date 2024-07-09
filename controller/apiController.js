@@ -141,12 +141,14 @@ const analyzePDF = async (req, res) => {
       const textractResults = [];
 
       await Promise.all(s3Keys.map(async (s3Key, index) => {
-        await delay(index * 3000); // Delay each request by index * 3000ms (adjust as needed)
+        await delay(index * 5000); // Delay each request by index * 3000ms (adjust as needed)
         const jobId = await startDocumentAnalysis(s3Key, queries, adapterId, adapterVersion);
         const blocks = await getDocumentAnalysis(jobId);
 
         // Process the blocks to extract the query results
         const queryResultsById = {};
+        const bestAnswersByQueryAlias = {}; // Store best answers by query alias
+
         blocks.forEach(block => {
           if (block.BlockType === "QUERY_RESULT") {
             queryResultsById[block.Id] = {
@@ -159,22 +161,42 @@ const analyzePDF = async (req, res) => {
         blocks.forEach(block => {
           if (block.BlockType === "QUERY") {
             const answers = block.Relationships?.[0]?.Ids.map(id => queryResultsById[id]).filter(Boolean);
-            if (answers && answers.length > 0) {
-              textractResults.push({
-                QueryAlias: block.Query.Alias,
-                QuestionText: block.Query.Text,
-                AnswerText: answers.map(answer => answer.Text).join(' '), // Concatenate all parts of the answer
-                AnswerConfidence: answers.length > 0 ? answers[0].Confidence : undefined // Use the confidence of the first part of the answer
+            if (answers) {
+              answers.forEach(answer => {
+                const queryAlias = block.Query.Alias;
+                // Check if we already have a better answer for this query alias
+                if (!bestAnswersByQueryAlias[queryAlias] || bestAnswersByQueryAlias[queryAlias].Confidence < answer.Confidence) {
+                  bestAnswersByQueryAlias[queryAlias] = {
+                    QueryAlias: queryAlias,
+                    QuestionText: block.Query.Text,
+                    AnswerText: answer.Text,
+                    AnswerConfidence: answer.Confidence
+                  };
+                }
               });
             }
           }
         });
+
+        // Add the best answers for this PDF to the textractResults array
+        Object.values(bestAnswersByQueryAlias).forEach(bestAnswer => textractResults.push(bestAnswer));
       }));
+
+      const uniqueTextractResults = {};
+      textractResults.forEach(result => {
+        const alias = result.QueryAlias;
+        if (!uniqueTextractResults[alias] || uniqueTextractResults[alias].AnswerConfidence < result.AnswerConfidence) {
+          uniqueTextractResults[alias] = result;
+        }
+      });
+
+      // Convert the unique results back into an array
+      const filteredResults = Object.values(uniqueTextractResults);
 
       // Return the results for this PDF
       return {
         fileName: fileName,
-        data: textractResults
+        data: filteredResults
       };
     }));
 
@@ -352,7 +374,6 @@ module.exports = {
 
 /*
 
-const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { DeleteObjectCommand, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { resError, resSuccess } = require("../utils/responseMessage");
 const { s3Client } = require("../config/s3Client");
@@ -410,7 +431,7 @@ const chunkArray = (array, chunkSize) => {
 
 const analyzePDF = async (req, res) => {
   try {
-    const allS3Keys = req.body.allS3Keys; // Assuming the request body contains the allS3Keys array
+    const { allS3Keys, queries, adapterId, adapterVersion } = req.body; // Assuming the request body contains these parameters
 
     if (!allS3Keys || !Array.isArray(allS3Keys)) {
       console.log("Invalid request body.");
@@ -432,9 +453,9 @@ const analyzePDF = async (req, res) => {
           AdaptersConfig: {
             Adapters: [
               {
-                AdapterId: "9abf280d752c", // Replace with your Adapter ID
+                AdapterId: adapterId, // Replace with your Adapter ID
                 Pages: ["1"], // Specify the pages to apply the adapter
-                Version: "2", // Replace with the adapter version
+                Version: adapterVersion, // Replace with the adapter version
               },
             ],
           },
@@ -446,31 +467,6 @@ const analyzePDF = async (req, res) => {
           },
           FeatureTypes: ["QUERIES"],
         };
-
-        const queries = [
-          { Alias: "customerName", Text: "What's the name of customer?" },
-          { Alias: "customerAddress", Text: "What's the address of customer?" },
-          { Alias: "registrationNumber", Text: "What's the registration number?" },
-          { Alias: "firstRegistered", Text: "When's the first registered of Vehicle?" },
-          { Alias: "lenderName", Text: "What's the name of lender?" },
-          { Alias: "lenderAddress", Text: "What's the address of lender?" },
-          { Alias: "creditIntermediaryName", Text: "What's the name of Credit Intermediary?" },
-          { Alias: "creditIntermediaryAddress", Text: "What's the address of Credit Intermediary?" },
-          { Alias: "totalCashPrice", Text: "How much is the total cash Price of goods?" },
-          { Alias: "advancePaymentCash", Text: "How much is the Advance Payment (Cash)?" },
-          { Alias: "advancePaymentPartExchange", Text: "How much is the Advance Payment (Part Exchange)?" },
-          { Alias: "amountOfCredit", Text: "How much is the amount of credit?" },
-          { Alias: "financeCharges", Text: "How much is the Plus Finance Charges of Interest, Acceptance Fee, Purchase Fee?" },
-          { Alias: "totalAmountPayable", Text: "How much is the Total Amount Payable?" },
-          { Alias: "aprRate", Text: "How much is the percent of APR?" },
-          { Alias: "agreementDuration", Text: "How many months are the Duration of agreement?" },
-          { Alias: "finalMonthPayment", Text: "How much is the final month payment?" },
-          { Alias: "monthlyPayments", Text: "How much is the monthly Payments?" },
-          { Alias: "signatureDate", Text: "When was the signature on behalf of the lender made?" },
-          { Alias: "agreementNumber", Text: "What's the agreement Number of contract document?" },
-          { Alias: "vehicleMakeModel", Text: "What's the Make/Model of vehicle?" },
-          { Alias: "vehicleVIN", Text: "What's the VIN number?" },
-        ];
 
         const queryChunks = chunkArray(queries, 15);
 
@@ -528,7 +524,11 @@ const analyzePDF = async (req, res) => {
   }
 };
 
-const uploadFiles = (req, res) => {
+const uploadFiles = async (req, res) => {
+  const rootUploadsDir = path.join(__dirname, '..', 'uploads'); // Path to the root uploads directory
+  // Ensure the root uploads directory exists
+  await fs.mkdir(rootUploadsDir, { recursive: true });
+
   upload.array('files')(req, res, async (error) => {
     if (error instanceof multer.MulterError) {
       console.error('Multer Error:', error);
@@ -544,6 +544,9 @@ const uploadFiles = (req, res) => {
     }
 
     try {
+
+
+
       const allS3Keys = [];
 
       for (const file of req.files) {
@@ -597,8 +600,6 @@ const uploadFiles = (req, res) => {
             fileName: file.originalname,
             s3Keys: s3Keys,
           });
-
-          // Note: Removed the file deletion logic
         } else if (file.mimetype.startsWith('image/')) {
           // Handle image file
           const imageFileContent = await fs.readFile(inputFilePath);
@@ -620,7 +621,7 @@ const uploadFiles = (req, res) => {
             fileName: file.originalname,
             s3Keys: [s3Key],
           });
-
+          // await unlinkAsync(file.path)
           // Note: Removed the file deletion logic
         } else {
           console.error('Unsupported file type:', file.mimetype);
@@ -646,7 +647,7 @@ const uploadFiles = (req, res) => {
 
 const deleteAllUploads = async (req, res) => {
   const directory = path.join(__dirname, 'uploads');
-
+  const rootUploadsDir = path.join(__dirname, '..', 'uploads');
   const deleteDirectoryContents = async (dir) => {
     const files = await fs.readdir(dir);
     await Promise.all(files.map(async (file) => {
@@ -663,13 +664,13 @@ const deleteAllUploads = async (req, res) => {
 
   try {
     await deleteDirectoryContents(directory);
+    await fs.rmdir(rootUploadsDir, { recursive: true, force: true});
     res.send({ message: 'All files and directories in the uploads folder have been deleted successfully.' });
   } catch (err) {
     console.error('Error deleting uploads folder contents:', err);
     res.status(500).send('Error deleting uploads folder contents: ' + err.message);
   }
 };
-
 module.exports = {
   analyzePDF,
   uploadFiles,
