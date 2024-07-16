@@ -81,7 +81,14 @@ function convertToDateFormat(dateStr, dateType) {
         year = '20' + parts[3]
     } else if (parts.length === 3) { // Case: 01 ME/JUN 2024 or 16 JUL 2024
       month = getMonthNumber(parts[1].split('/')[1] || parts[1]);
-      year = parts[2];
+      if (parts[2].length === 2) {
+        if (dateType === 'DateOfBirth')
+          year = parts[2] < 30 ? '20' + parts[2] : '19' + parts[2];
+        else
+          year = '20' + parts[2]
+      } else {
+        year = parts[2]
+      }
     }
   } else if (dateStr.includes('.')) { // Case: 20.05.2023
     const parts = dateStr.split('.');
@@ -350,8 +357,6 @@ const uploadFiles = async (req, res) => {
 
     try {
 
-
-
       const allS3Keys = [];
 
       for (const file of req.files) {
@@ -566,7 +571,8 @@ const iDCardFiles = async (req, res) => {
           }
         }
       });
-      const mis_result  = checkPassportData(textractResults, first_name, last_name, birth );
+      console.log(textractResults)
+      const mis_result  = checkPassportData(textractResults, first_name, last_name, birth);
       res.json(mis_result);
     } catch (err) {
       console.error('Error processing files or uploading to S3:', err);
