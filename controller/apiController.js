@@ -37,32 +37,75 @@ const storage = multer.diskStorage({
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const upload = multer({ storage: storage });
-const monthMap = {
-  'EAN': 'JAN', 'JAN': 'JAN', 'JANY': 'JAN',
-  'FEA': 'FEB', 'FEB': 'FEB', 'FBR': 'FEB',
-  'MAR': 'MAR', 'MRZ': 'MAR',
-  'APR': 'APR', 'AVR': 'APR',
-  'MAI': 'MAY', 'MAY': 'MAY',
-  'JUN': 'JUN', 'JUNY': 'JUN',
-  'JUL': 'JUL', 'JLY': 'JUL',
-  'AUG': 'AUG', 'AGS': 'AUG',
-  'SEP': 'SEP', 'SEPT': 'SEP',
-  'OCT': 'OCT', 'OKT': 'OCT',
-  'NOV': 'NOV', 'NOB': 'NOV',
-  'DEC': 'DEC', 'DEZ': 'DEC'
-};
 
-function reformatDate(dateStr) {
-  const dateParts = dateStr.split(' ');
-  if (dateParts.length === 3) {
-    let day = dateParts[0];
-    let month = dateParts[1].split('/')[1]; // Correct month should be second part of the split
-    let year = dateParts[2];
-    month = monthMap[month] || month; // Correct the month abbreviation
-    const formattedDate = moment(`${day} ${month} ${year}`, 'DD MMM YYYY').format('YYYY-MM-DD');
-    return formattedDate;
+function convertToDateFormat(dateStr, dateType) {
+  // Define month mapping with French short names
+  const monthMapping = {
+    'JAN': '01', 'JANVIER': '01', 'JANV': '01',
+    'FEB': '02', 'FEVRIER': '02', 'FEV': '02',
+    'MAR': '03', 'MARS': '03',
+    'APR': '04', 'AVRIL': '04', 'AVR': '04',
+    'MAY': '05', 'MAI': '05',
+    'JUN': '06', 'JUIN': '06', 'JUI': '06',
+    'JUL': '07', 'JUILLET': '07', 'JUL': '07',
+    'AUG': '08', 'AOUT': '08', 'AOÛ': '08',
+    'SEP': '09', 'SEPTEMBRE': '09', 'SEP': '09',
+    'OCT': '10', 'OCTOBRE': '10', 'OCT': '10',
+    'NOV': '11', 'NOVEMBRE': '11', 'NOV': '11',
+    'DEC': '12', 'DECEMBRE': '12', 'DÉC': '12'
+  };
+
+  // Helper function to map month names to numbers
+  function getMonthNumber(month) {
+    return monthMapping[month.toUpperCase()] || month;
   }
-  return dateStr; // Return the original string if it doesn't match the expected format
+
+  let day, month, year;
+
+  // Split input date based on spaces or dots
+  if (dateStr.includes(' ')) {
+    const parts = dateStr.split(' ');
+    day = parts[0];
+
+    if (parts.length === 5) { // Case: 07 JUN / JUIN 94
+      month = getMonthNumber(parts[1]);
+      if (dateType === 'DateOfBirth')
+        year = Number(parts[4]) < 30 ? '20' + parts[4] : '19' + parts[4];
+      else
+        year = '20' + parts[4]
+    } else if (parts.length === 4) { // Case: 07 JUN / JUIN 94
+        month = getMonthNumber(parts[1]);
+      if (dateType === 'DateOfBirth')
+        year = Number(parts[3]) < 30 ? '20' + parts[3] : '19' + parts[3];
+      else
+        year = '20' + parts[3]
+    } else if (parts.length === 3) { // Case: 01 ME/JUN 2024 or 16 JUL 2024
+      month = getMonthNumber(parts[1].split('/')[1] || parts[1]);
+      year = parts[2];
+    }
+  } else if (dateStr.includes('.')) { // Case: 20.05.2023
+    const parts = dateStr.split('.');
+    day = parts[0];
+    month = parts[1];
+    year = parts[2];
+  } else {
+    return null;
+  }
+
+  // Ensure day and month are two digits
+  // day = day.padStart(2, '0');
+  // month = month.padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
+
+function calculateAge(birthDateStr) {
+  // Parse the input date string
+  const birthDate = new Date(birthDateStr);
+  const today = new Date();
+
+  let age = today.getFullYear() - birthDate.getFullYear();
+  return age;
 }
 
 function checkPassportData(userIdData, firstName, lastName, dob) {
@@ -70,11 +113,14 @@ function checkPassportData(userIdData, firstName, lastName, dob) {
   var extractedData = {}
   userIdData.map((item) => {
     if (item.QueryAlias === 'DateOfBirth' || item.QueryAlias === 'IssueDate' || item.QueryAlias === 'ExpireDate') {
-      extractedData[item.QueryAlias] = reformatDate(item.AnswerText);
+      extractedData[item.QueryAlias] = convertToDateFormat(item.AnswerText,  item.QueryAlias);
+      if (item.QueryAlias === 'DateOfBirth')
+        extractedData['Age'] = calculateAge(extractedData[item.QueryAlias]);
+    } else if (item.QueryAlias === 'Sex') {
+      extractedData[item.QueryAlias] = item.AnswerText === "M" || item.AnswerText === "MR" ? "M" : "F";
     } else {
-      extractedData[item.QueryAlias] = item.AnswerText;
-    }
-  });
+    extractedData[item.QueryAlias] = item.AnswerText;
+  }});
   console.log(extractedData);
   const mismatches = [];
 
@@ -102,7 +148,8 @@ function checkPassportData(userIdData, firstName, lastName, dob) {
 
   return {
     status,
-    mismatches
+    mismatches,
+    extractedData
   };
 }
 
@@ -421,7 +468,7 @@ const iDCardFiles = async (req, res) => {
       return;
     }
     console.log(req.body)
-    const {first_name, last_name, email, lender_name, phone, birthday, address} = req.body;
+    const {first_name, last_name, email, lender_name, phone, birth, country, state, street, zip} = req.body;
     try {
       let idS3Key = {};
       const file = req.files[0];
@@ -519,9 +566,8 @@ const iDCardFiles = async (req, res) => {
           }
         }
       });
-      const mis_result  = checkPassportData(textractResults, first_name, last_name, birthday );
-      res.json({ textractResults, mis_result});
-
+      const mis_result  = checkPassportData(textractResults, first_name, last_name, birth );
+      res.json(mis_result);
     } catch (err) {
       console.error('Error processing files or uploading to S3:', err);
       res.status(500).send('Error processing files or uploading to S3: ' + err.message);
