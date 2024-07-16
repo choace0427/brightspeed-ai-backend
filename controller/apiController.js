@@ -6,11 +6,16 @@ const AWS = require("../config/aws-config");
 const multer = require('multer');
 const path = require('path');
 const hummus = require('hummus');
+const moment = require('moment');
 const {
   TextractClient,
   StartDocumentAnalysisCommand,
   GetDocumentAnalysisCommand,
+  AnalyzeIDCommand,
+  AnalyzeDocumentCommand
 } = require("@aws-sdk/client-textract");
+
+
 const fs = require('fs').promises;
 // Initialize the Textract client
 const textractClient = new TextractClient({
@@ -32,6 +37,74 @@ const storage = multer.diskStorage({
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const upload = multer({ storage: storage });
+const monthMap = {
+  'EAN': 'JAN', 'JAN': 'JAN', 'JANY': 'JAN',
+  'FEA': 'FEB', 'FEB': 'FEB', 'FBR': 'FEB',
+  'MAR': 'MAR', 'MRZ': 'MAR',
+  'APR': 'APR', 'AVR': 'APR',
+  'MAI': 'MAY', 'MAY': 'MAY',
+  'JUN': 'JUN', 'JUNY': 'JUN',
+  'JUL': 'JUL', 'JLY': 'JUL',
+  'AUG': 'AUG', 'AGS': 'AUG',
+  'SEP': 'SEP', 'SEPT': 'SEP',
+  'OCT': 'OCT', 'OKT': 'OCT',
+  'NOV': 'NOV', 'NOB': 'NOV',
+  'DEC': 'DEC', 'DEZ': 'DEC'
+};
+
+function reformatDate(dateStr) {
+  const dateParts = dateStr.split(' ');
+  if (dateParts.length === 3) {
+    let day = dateParts[0];
+    let month = dateParts[1].split('/')[1]; // Correct month should be second part of the split
+    let year = dateParts[2];
+    month = monthMap[month] || month; // Correct the month abbreviation
+    const formattedDate = moment(`${day} ${month} ${year}`, 'DD MMM YYYY').format('YYYY-MM-DD');
+    return formattedDate;
+  }
+  return dateStr; // Return the original string if it doesn't match the expected format
+}
+
+function checkPassportData(userIdData, firstName, lastName, dob) {
+  console.log(firstName, lastName, dob)
+  var extractedData = {}
+  userIdData.map((item) => {
+    if (item.QueryAlias === 'DateOfBirth' || item.QueryAlias === 'IssueDate' || item.QueryAlias === 'ExpireDate') {
+      extractedData[item.QueryAlias] = reformatDate(item.AnswerText);
+    } else {
+      extractedData[item.QueryAlias] = item.AnswerText;
+    }
+  });
+  console.log(extractedData);
+  const mismatches = [];
+
+  if (extractedData.GivenName.toLowerCase() !== firstName.toLowerCase() || extractedData.Surname.toLowerCase() !== lastName.toLowerCase()) {
+    mismatches.push({ field: 'name', message: 'Mis Matching Name' });
+  }
+
+  if (extractedData.DateOfBirth !== dob) {
+    mismatches.push({ field: 'dob', message: 'Mis Matching DOB' });
+  }
+  //
+  const parsedIssuedDate = new Date(extractedData.IssueDate);
+  const parsedExpiryDate = new Date(extractedData.ExpireDate);
+  const parsedCurrentDate = new Date();
+
+  if (parsedExpiryDate <= parsedIssuedDate) {
+    mismatches.push({ field: 'expiryDate', message: 'Expiry date must be after the issued date' });
+  }
+
+  if (parsedCurrentDate >= parsedExpiryDate) {
+    mismatches.push({ field: 'expiryDate', message: 'Expiry date has expired' });
+  }
+
+  const status = mismatches.length === 0 ? 'success' : 'failure';
+
+  return {
+    status,
+    mismatches
+  };
+}
 
 const startDocumentAnalysis = async (s3Key, queries, adapterId, adapterVersion) => {
   const params = {
@@ -329,7 +402,133 @@ const uploadFiles = async (req, res) => {
   });
 };
 
-// Function to recursively delete all files and directories within a given directory
+
+const iDCardFiles = async (req, res) => {
+  const rootUploadsDir = path.join(__dirname, '..', 'uploads'); // Path to the root uploads directory
+  await fs.mkdir(rootUploadsDir, { recursive: true });
+
+  upload.array('id_card')(req, res, async (error) => {
+    if (error instanceof multer.MulterError) {
+      console.error('Multer Error:', error);
+      res.status(500).send('Multer Error: ' + error.message);
+      return;
+    } else if (error) {
+      console.error('Unknown Error:', error);
+      res.status(500).send('Unknown Error: ' + error.message);
+      return;
+    } else if (!req.files || req.files.length === 0) {
+      res.status(400).send('Error: No files selected.');
+      return;
+    }
+    console.log(req.body)
+    const {first_name, last_name, email, lender_name, phone, birthday, address} = req.body;
+    try {
+      let idS3Key = {};
+      const file = req.files[0];
+      const inputFilePath = file.path;
+      const uniqueDirName = path.basename(file.originalname, path.extname(file.originalname)) + '_' + Date.now();
+
+      if (file.mimetype.startsWith('image/')) {
+          // Handle image file
+          const imageFileContent = await fs.readFile(inputFilePath);
+          const s3Key = `uploaded_id_images/${uniqueDirName}${path.extname(file.originalname)}`;
+
+          // Create a PutObjectCommand to upload the file to S3
+          const uploadParams = {
+            Bucket: 'ocr-demo-bucket-advantage', // Replace with your bucket name
+            Key: s3Key,
+            Body: imageFileContent,
+            ContentType: file.mimetype,
+          };
+
+          // Upload the image to S3
+          await s3Client.send(new PutObjectCommand(uploadParams));
+          idS3Key = s3Key
+
+        } else {
+          console.error('Unsupported file type:', file.mimetype);
+          res.status(400).send('Error: Unsupported file type.');
+          return;
+        }
+
+        // Note: Removed the file deletion logic for the original file
+      const client = new TextractClient({region: "eu-west-2"});
+
+      const analyzeDocumentRequest = {
+        AdaptersConfig: {
+          Adapters: [
+            {
+              AdapterId: "1d4ba44bfc6b", // Replace with your Adapter ID
+              Pages: ["1"], // Specify the pages to apply the adapter
+              Version: '1', // Replace with the adapter version
+            },
+          ],
+        },
+        Document: {
+          S3Object: {
+            Bucket: "ocr-demo-bucket-advantage",
+            Name: idS3Key,
+          },
+        },
+        FeatureTypes: ["QUERIES"],
+        QueriesConfig: {
+          Queries: [
+            { Text: "What's the surname?", Alias: "Surname" },
+            { Text: "What's the given name?", Alias: "GivenName" },
+            { Text: "What's the middle name?", Alias: "MiddleName" },
+            { Text: "What's the date of birthday?", Alias: "DateOfBirth" },
+            { Text: "What's the issue date?", Alias: "IssueDate" },
+            { Text: "What's the expire date?", Alias: "ExpireDate" },
+            { Text: "What's the street and number?", Alias: "StreetAndNumber" },
+            { Text: "What's the city?", Alias: "City" },
+            { Text: "What's the postal code?", Alias: "PostalCode" },
+            { Text: "What's the Driving Licence Number?", Alias: "DrivingLicenceNumber" },
+            { Text: "What's the passport Number?", Alias: "PassportNumber" },
+            { Text: "What's the sex?", Alias: "Sex" },
+            { Text: "What's the country?", Alias: "Country" },
+            { Text: "What's the place of birth in the passport?", Alias: "PlaceOfBirth" },
+          ],
+        },
+      };
+
+
+      const result = await client.send(new AnalyzeDocumentCommand(analyzeDocumentRequest));
+      const queryResultsById = {};
+      const textractResults = [];
+      // First, store all QUERY_RESULT blocks by their Id
+      result.Blocks.forEach(block => {
+        if (block.BlockType === "QUERY_RESULT") {
+          queryResultsById[block.Id] = {
+            Text: block.Text,
+            Confidence: block.Confidence
+          };
+        }
+      });
+
+      // Next, find the corresponding QUERY_RESULT for each QUERY
+      result.Blocks.forEach(block => {
+        if (block.BlockType === "QUERY") {
+          const answers = block.Relationships?.[0]?.Ids.map(id => queryResultsById[id]).filter(Boolean);
+          if (answers && answers.length > 0) {
+            textractResults.push({
+              QueryAlias: block.Query.Alias,
+              QuestionText: block.Query.Text,
+              AnswerText: answers.map(answer => answer.Text).join(' '), // Concatenate all parts of the answer
+              AnswerConfidence: answers.length > 0 ? answers[0].Confidence : undefined // Use the confidence of the first part of the answer
+            });
+          }
+        }
+      });
+      const mis_result  = checkPassportData(textractResults, first_name, last_name, birthday );
+      res.json({ textractResults, mis_result});
+
+    } catch (err) {
+      console.error('Error processing files or uploading to S3:', err);
+      res.status(500).send('Error processing files or uploading to S3: ' + err.message);
+    }
+  });
+};
+
 const deleteAllUploads = async (req, res) => {
   const directory = path.join(__dirname, 'uploads');
   const rootUploadsDir = path.join(__dirname, '..', 'uploads');
@@ -360,7 +559,8 @@ const deleteAllUploads = async (req, res) => {
 module.exports = {
   analyzePDF,
   uploadFiles,
-  deleteAllUploads
+  deleteAllUploads,
+  iDCardFiles
 };
 
 
